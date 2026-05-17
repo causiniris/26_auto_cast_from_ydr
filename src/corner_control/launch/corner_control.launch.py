@@ -118,6 +118,39 @@ def generate_launch_description():
             }]
         ),
 
+        # -------- Horizontal Line Detector Node (横向纠偏辅助节点) --------
+        Node(
+            package='horizontal_line_control',
+            executable='horizontal_line_detector_node',
+            name='horizontal_line_detector_node',
+            output='screen',
+            parameters=[{
+                'binary_topic': '/line/binary_image',           # 两个节点吃同一张图！
+                'line_topic': '/horizontal_line/line',
+                'angle_topic': '/horizontal_line/angle_deg',
+                'x_topic': '/horizontal_line/y_at_x_half',
+                'debug_topic': '/horizontal_line/debug_image',
+                
+                'rotate_clockwise': True, # 根据你的实车摄像头朝向和要抓的侧边线决定
+                
+                'output_ema_alpha': 0.85,
+                'max_abs_angle_deg': 40.0,
+                'border_margin_px': 15,
+                'skyline_nan_min_y_ratio': 0.45,
+                'skyline_nan_max_y_ratio': 0.85,
+                
+                'publish_debug': True,
+                'show_fps_overlay': True,
+                'fps_ema_alpha': 0.2,
+                'morph_open_ksize': 3,
+                'morph_close_ksize': 5,
+                'hough_threshold': 15,
+                'hough_min_length': 30,
+                'hough_max_gap': 40,
+                'angle_penalty': 2.0
+            }]
+        ),
+
         # -------- Laser Node --------
         Node(
             package='laser',

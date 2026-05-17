@@ -22,6 +22,7 @@ namespace {
 constexpr uint8_t SOF = 0xA5;
 constexpr uint8_t TYPE_VISION_POINT = 0x01;
 constexpr uint8_t TYPE_VERTICAL_LINE = 0x05;
+constexpr uint8_t TYPE_HORIZONTAL_LINE = 0x06;
 constexpr uint8_t TYPE_LASER_RANGE = 0x04;
 constexpr uint8_t TYPE_HEARTBEAT = 0x81;
 constexpr uint8_t PAYLOAD_LEN_VISION = 6;
@@ -52,6 +53,7 @@ public:
     serial_port_ = declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
     corner_topic_ = declare_parameter<std::string>("corner_topic", "/line/corner");
     vertical_line_topic_ = declare_parameter<std::string>("vertical_line_topic", "/vertical_line/line");
+    horizontal_line_topic_ = declare_parameter<std::string>("horizontal_line_topic", "/horizontal_line/line");
     laser_dist_topic_ = declare_parameter<std::string>("laser_dist_topic", "/lidar_dist");
     laser_valid_topic_ = declare_parameter<std::string>("laser_valid_topic", "/lidar_valid");
     port_status_topic_ = declare_parameter<std::string>("port_status_topic", "/serial_bridge/port_ok");
@@ -66,6 +68,7 @@ public:
 
     latest_point_ = {false, 0.0, 0.0};
     latest_vertical_line_ = {false, 0.0, 0.0};
+    latest_horizontal_line_ = {false, 0.0, 0.0};
     latest_laser_ = {false, 0};
 
     corner_sub_ = create_subscription<geometry_msgs::msg::Point>(
@@ -74,6 +77,9 @@ public:
     vertical_line_sub_ = create_subscription<geometry_msgs::msg::Point>(
       vertical_line_topic_, 10,
       std::bind(&SerialBridgeNode::onVerticalLine, this, std::placeholders::_1));
+    horizontal_line_sub_ = create_subscription<geometry_msgs::msg::Point>(
+      horizontal_line_topic_, 10,
+      std::bind(&SerialBridgeNode::onHorizontalLine, this, std::placeholders::_1));
     laser_dist_sub_ = create_subscription<std_msgs::msg::UInt16>(
       laser_dist_topic_, 10,
       std::bind(&SerialBridgeNode::onLaserDistance, this, std::placeholders::_1));
@@ -118,6 +124,12 @@ private:
   struct VerticalLine {
     bool valid;
     double x;
+    double angle_deg;
+  };
+
+  struct HorizontalLine {
+    bool valid;
+    double y_norm;
     double angle_deg;
   };
 
@@ -178,6 +190,15 @@ private:
     latest_vertical_line_ = line;
   }
 
+  void onHorizontalLine(const geometry_msgs::msg::Point::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(horizontal_line_mutex_);
+    HorizontalLine line;
+    line.valid = std::isfinite(msg->x) && std::isfinite(msg->z);
+    line.y_norm = msg->x; 
+    line.angle_deg = msg->z;
+    latest_horizontal_line_ = line;
+  }
+
   void onLaserDistance(const std_msgs::msg::UInt16::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(laser_mutex_);
     latest_laser_.range_q = static_cast<uint16_t>(std::min<uint32_t>(msg->data, 2000U));
@@ -203,6 +224,11 @@ private:
     {
       std::lock_guard<std::mutex> lock(vertical_line_mutex_);
       line = latest_vertical_line_;
+    }
+    HorizontalLine h_line;
+    {
+      std::lock_guard<std::mutex> lock(horizontal_line_mutex_);
+      h_line = latest_horizontal_line_;
     }
     LaserRange laser;
     {
@@ -237,6 +263,19 @@ private:
     vertical_line_payload[4] = static_cast<uint8_t>((static_cast<uint16_t>(angle_q) >> 8) & 0xFF);
     vertical_line_payload[5] = static_cast<uint8_t>(std::clamp(confidence_value_, 0, 255));
     writeFrame(TYPE_VERTICAL_LINE, vertical_line_payload, PAYLOAD_LEN_VISION);
+
+    uint8_t horizontal_line_payload[PAYLOAD_LEN_VISION] = {0};
+    horizontal_line_payload[0] = h_line.valid ? 1 : 0;
+    const uint16_t h_line_y_q = static_cast<uint16_t>(std::round(clamp_norm(h_line.y_norm) * 10000.0));
+    double h_angle_deg = std::isfinite(h_line.angle_deg) ? h_line.angle_deg : 0.0;
+    h_angle_deg = std::max(-180.0, std::min(180.0, h_angle_deg)); 
+    const int16_t h_angle_q = static_cast<int16_t>(std::round(h_angle_deg * 100.0));
+    horizontal_line_payload[1] = static_cast<uint8_t>(h_line_y_q & 0xFF);
+    horizontal_line_payload[2] = static_cast<uint8_t>((h_line_y_q >> 8) & 0xFF);
+    horizontal_line_payload[3] = static_cast<uint8_t>(static_cast<uint16_t>(h_angle_q) & 0xFF);
+    horizontal_line_payload[4] = static_cast<uint8_t>((static_cast<uint16_t>(h_angle_q) >> 8) & 0xFF);
+    horizontal_line_payload[5] = static_cast<uint8_t>(std::clamp(confidence_value_, 0, 255));
+    writeFrame(TYPE_HORIZONTAL_LINE, horizontal_line_payload, PAYLOAD_LEN_VISION);
 
     uint8_t laser_payload[PAYLOAD_LEN_LASER] = {0};
     const uint16_t laser_range_q = laser.valid ? laser.range_q : 0;
@@ -347,6 +386,7 @@ private:
   std::string serial_port_;
   std::string corner_topic_;
   std::string vertical_line_topic_;
+  std::string horizontal_line_topic_;
   std::string laser_dist_topic_;
   std::string laser_valid_topic_;
   std::string port_status_topic_;
@@ -361,6 +401,7 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr corner_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr vertical_line_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr horizontal_line_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt16>::SharedPtr laser_dist_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr laser_valid_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr port_status_pub_;
@@ -368,9 +409,11 @@ private:
 
   std::mutex point_mutex_;
   std::mutex vertical_line_mutex_;
+  std::mutex horizontal_line_mutex_;
   std::mutex laser_mutex_;
   VisionPoint latest_point_;
   VerticalLine latest_vertical_line_;
+  HorizontalLine latest_horizontal_line_;
   LaserRange latest_laser_;
   uint8_t seq_;
 
